@@ -132,6 +132,7 @@ def initialiser_portefeuille():
                 id BIGSERIAL PRIMARY KEY,
                 nom TEXT NOT NULL CHECK (length(trim(nom)) > 0),
                 prix_achat NUMERIC NOT NULL CHECK (prix_achat > 0),
+                prix_actuel NUMERIC CHECK (prix_actuel >= 0),
                 quantite INTEGER NOT NULL CHECK (quantite > 0),
                 date_creation TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
@@ -152,7 +153,7 @@ def ajouter_achat(nom, prix_achat, quantite):
 def lire_portefeuille():
     with connexion_bd() as conn:
         return conn.execute("""
-            SELECT id, nom, prix_achat, quantite
+            SELECT id, nom, prix_achat, quantite, prix_actuel
             FROM portefeuille
             ORDER BY date_creation DESC, id DESC
         """).fetchall()
@@ -164,6 +165,17 @@ def supprimer_achat(achat_id):
             (achat_id,),
         )
 
+def enregistrer_prix_actuel(achat_id, cle_champ):
+    if not st.session_state.get("portefeuille_autorise", False):
+        return
+
+    prix_actuel = Decimal(str(st.session_state[cle_champ]))
+
+    with connexion_bd() as conn:
+        conn.execute(
+            "UPDATE portefeuille SET prix_actuel = %s WHERE id = %s",
+            (prix_actuel, achat_id),
+        )
 
 def afficher_portefeuille():
     initialiser_portefeuille()
@@ -237,12 +249,20 @@ def afficher_portefeuille():
                 supprimer_achat(identifiant)
                 st.rerun()
 
+        cle_champ = f"portefeuille_cours_{identifiant}"
+
+        prix_enregistre = achat["prix_actuel"]
+        if prix_enregistre is None:
+            prix_enregistre = prix
+
         actuel = st.number_input(
             "Prix actuel unitaire (DH)",
             min_value=0.0,
-            value=float(prix),
+            value=float(prix_enregistre),
             step=0.01,
-            key=f"portefeuille_cours_{identifiant}",
+            key=cle_champ,
+            on_change=enregistrer_prix_actuel,
+            args=(identifiant, cle_champ),
         )
 
         capital_investi = prix * qte * (1 + taux_achat)
