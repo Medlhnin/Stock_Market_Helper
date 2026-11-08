@@ -156,6 +156,13 @@ def lire_portefeuille():
             FROM portefeuille
             ORDER BY date_creation DESC, id DESC
         """).fetchall()
+    
+def supprimer_achat(achat_id):
+    with connexion_bd() as conn:
+        conn.execute(
+            "DELETE FROM portefeuille WHERE id = %s",
+            (achat_id,),
+        )
 
 
 def afficher_portefeuille():
@@ -218,6 +225,17 @@ def afficher_portefeuille():
             f"**{achat['nom']}** — {qte} action(s) "
             f"achetée(s) à {prix:.2f} DH"
         )
+
+        if st.checkbox(
+            "Confirmer la suppression de cet achat",
+            key=f"confirmer_suppression_{identifiant}",
+        ):
+            if st.button(
+                "Supprimer cette ligne",
+                key=f"supprimer_achat_{identifiant}",
+            ):
+                supprimer_achat(identifiant)
+                st.rerun()
 
         actuel = st.number_input(
             "Prix actuel unitaire (DH)",
