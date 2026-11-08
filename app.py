@@ -1,5 +1,10 @@
 import streamlit as st
 import math
+import hmac
+import psycopg
+
+from decimal import Decimal
+from psycopg.rows import dict_row
 
 st.set_page_config(page_title="Simulateur Trading", layout="centered")
 
@@ -10,11 +15,12 @@ frais_achat = 0.0099
 frais_vente = 0.01
 taxe = 0.15  # TPCVM
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🎯 Trading (objectif)",
     "💰 Gain actuel",
     "📈 Compound interest ",
-    "⏳ Calcul du temps t"
+    "⏳ Calcul du temps t",
+    "💼 Mon portefeuille"
 ])
 # =========================================================
 # TAB 1 : Objectif de gain
@@ -110,3 +116,197 @@ with tab4:
         st.write(f"⏳ Temps nécessaire t : **{t_calc:.2f} ans**")
     else:
         st.warning("Valeurs invalides pour le calcul")
+
+def connexion_bd():
+    return psycopg.connect(
+        st.secrets["database"]["url"],
+        row_factory=dict_row,
+        connect_timeout=10,
+    )
+
+
+def initialiser_portefeuille():
+    with connexion_bd() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS portefeuille (
+                id BIGSERIAL PRIMARY KEY,
+                nom TEXT NOT NULL CHECK (length(trim(nom)) > 0),
+                prix_achat NUMERIC NOT NULL CHECK (prix_achat > 0),
+                quantite INTEGER NOT NULL CHECK (quantite > 0),
+                date_creation TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+
+
+def ajouter_achat(nom, prix_achat, quantite):
+    with connexion_bd() as conn:
+        conn.execute(
+            """
+            INSERT INTO portefeuille (nom, prix_achat, quantite)
+            VALUES (%s, %s, %s)
+            """,
+            (nom, Decimal(str(prix_achat)), quantite),
+        )
+
+
+def lire_portefeuille():
+    with connexion_bd() as conn:
+        return conn.execute("""
+            SELECT id, nom, prix_achat, quantite
+            FROM portefeuille
+            ORDER BY date_creation DESC, id DESC
+        """).fetchall()
+
+
+def afficher_portefeuille():
+    initialiser_portefeuille()
+
+    st.subheader("Ajouter un achat")
+
+    with st.form("form_ajout_achat", clear_on_submit=True):
+        nom = st.text_input("Nom de l’action", max_chars=100)
+
+        prix_achat = st.number_input(
+            "Prix d’achat unitaire (DH)",
+            min_value=0.01,
+            value=100.0,
+            step=0.01,
+        )
+
+        quantite = st.number_input(
+            "Quantité achetée",
+            min_value=1,
+            value=10,
+            step=1,
+        )
+
+        enregistrer = st.form_submit_button("💾 Enregistrer")
+
+    if enregistrer:
+        if not nom.strip():
+            st.warning("Saisis le nom de l’action.")
+        else:
+            ajouter_achat(nom.strip(), prix_achat, quantite)
+            st.success("Achat enregistré.")
+
+    st.subheader("Mes investissements")
+    st.caption(
+        "Saisis le prix actuel de chaque action pour simuler une vente. "
+        "Ces prix restent dans la session et ne sont pas enregistrés en base."
+    )
+
+    achats = lire_portefeuille()
+
+    if not achats:
+        st.info("Aucun achat enregistré pour le moment.")
+        return
+
+    taux_achat = Decimal(str(frais_achat))
+    taux_vente = Decimal(str(frais_vente))
+    taux_taxe = Decimal(str(taxe))
+
+    lignes = []
+    total_investi = Decimal("0")
+    total_gain = Decimal("0")
+
+    for achat in achats:
+        identifiant = achat["id"]
+        prix = achat["prix_achat"]
+        qte = achat["quantite"]
+
+        st.markdown(
+            f"**{achat['nom']}** — {qte} action(s) "
+            f"achetée(s) à {prix:.2f} DH"
+        )
+
+        actuel = st.number_input(
+            "Prix actuel unitaire (DH)",
+            min_value=0.0,
+            value=float(prix),
+            step=0.01,
+            key=f"portefeuille_cours_{identifiant}",
+        )
+
+        capital_investi = prix * qte * (1 + taux_achat)
+        vente_brute = Decimal(str(actuel)) * qte
+        vente_nette = vente_brute * (1 - taux_vente)
+
+        resultat_avant_taxe = vente_nette - capital_investi
+
+        # Hypothèse de simulation :
+        # taxe uniquement sur les gains positifs.
+        taxe_simulee = max(
+            resultat_avant_taxe, Decimal("0")
+        ) * taux_taxe
+
+        gain_net = resultat_avant_taxe - taxe_simulee
+        rentabilite = gain_net / capital_investi * 100
+
+        lignes.append({
+            "Action": achat["nom"],
+            "Quantité": qte,
+            "Prix d’achat (DH)": float(prix),
+            "Prix actuel (DH)": actuel,
+            "Capital investi, frais inclus (DH)": round(
+                float(capital_investi), 2
+            ),
+            "Gain / Perte net(te) (DH)": round(float(gain_net), 2),
+            "Rentabilité (%)": round(float(rentabilite), 2),
+        })
+
+        total_investi += capital_investi
+        total_gain += gain_net
+
+    st.subheader("Récapitulatif")
+    st.dataframe(lignes, hide_index=True, use_container_width=True)
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Capital investi", f"{total_investi:,.2f} DH")
+    col2.metric("Gain / Perte net(te)", f"{total_gain:+,.2f} DH")
+    col3.metric(
+        "Rentabilité globale",
+        f"{total_gain / total_investi * 100:+.2f} %",
+    )
+
+    st.caption(
+        "Simulation basée sur les frais et le taux de taxe définis "
+        "dans l’application, sans compensation fiscale entre les lignes."
+    )
+
+
+with tab5:
+    st.header("💼 Mon portefeuille")
+
+    if not st.session_state.get("portefeuille_autorise", False):
+        with st.form("connexion_portefeuille"):
+            mot_de_passe = st.text_input(
+                "Mot de passe du portefeuille",
+                type="password",
+            )
+            connexion = st.form_submit_button("Accéder")
+
+        if connexion:
+            attendu = st.secrets["portfolio"]["password"]
+
+            if hmac.compare_digest(
+                mot_de_passe.encode("utf-8"),
+                attendu.encode("utf-8"),
+            ):
+                st.session_state["portefeuille_autorise"] = True
+                st.rerun()
+            else:
+                st.error("Mot de passe incorrect.")
+
+    else:
+        if st.button("Se déconnecter du portefeuille"):
+            st.session_state["portefeuille_autorise"] = False
+            st.rerun()
+
+        try:
+            afficher_portefeuille()
+        except psycopg.Error:
+            st.error(
+                "Impossible d’accéder à la base de données. "
+                "Vérifie la connexion PostgreSQL dans les secrets."
+            )
